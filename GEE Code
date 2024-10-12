@@ -1,0 +1,67 @@
+// Function to mask clouds using the QA_PIXEL band of Landsat 8 SR data.
+function maskL8sr(image) {
+  var cloudShadowBitMask = 1 << 3;
+  var cloudsBitMask = 1 << 5;
+  var qa = image.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+                .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  return image.updateMask(mask).divide(10000)
+              .select("SR_B[1-7]")
+              .copyProperties(image, ["system:time_start"]);
+}
+
+// Function to calculate NDWI.
+function calculateNDWI(image) {
+  var ndwi = image.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+  return image.addBands(ndwi);
+}
+
+// Load and process the Landsat 8 image collection.
+
+var landsat8Pre = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+                .filterBounds(geometry)
+                .filterDate('2024-01-01', '2024-01-30')
+                .map(maskL8sr)
+                .map(calculateNDWI)
+                .median();
+
+var landsat8During = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+                .filterBounds(geometry)
+                .filterDate('2024-08-19', '2020-08-30')
+                .map(maskL8sr)
+                .map(calculateNDWI)
+                .median();
+
+
+// Define training points with 'class' property (0 for non-water, 1 for water).
+var trainingPoints = ee.FeatureCollection([
+  ee.Feature(ee.Geometry.Point(['Non-water']), {'class': 0}), // Non-water
+  ee.Feature(ee.Geometry.Point(['Water']), {'class': 1})  // Water
+  // Add more points as needed
+]);
+
+
+// Sample the input imagery to get training data.
+var training = landsat8.sampleRegions({
+  collection: trainingPoints,
+  properties: ['class'],
+  scale: 30
+});
+
+// Train a Random Forest classifier.
+var classifier = ee.Classifier.smileRandomForest(100).train({
+  features: training,
+  classProperty: 'class',
+  inputProperties: landsat8.bandNames()
+});
+
+// Classify the image.
+var classifiedPre = landsat8.classify(classifier);
+var classifiedDuring = landsat8.classify(classifier);
+
+var Flood = classifiedPre.substract.classifiedDuring;
+
+// Display the results.
+Map.centerObject(geometry, 10);
+Map.addLayer(landsat8, {bands: ['SR_B4', 'SR_B3', 'SR_B2'], max: 0.3}, 'Landsat 8');
+Map.addLayer(Flood, {min: 0, max: 1, palette: ['red', 'blue']}, 'Flood');
